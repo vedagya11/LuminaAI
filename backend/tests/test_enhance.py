@@ -44,6 +44,18 @@ def test_shadows_are_lifted_more_than_highlights():
     assert bright_out < 250
 
 
+def test_disabling_retinex_lifts_shadows_less():
+    """Ablation: the shadow lift has to come from Retinex, not from a later global stage."""
+
+    bgr = np.full((96, 128, 3), 22, dtype=np.uint8)
+    full, full_meta = enhance_classical(bgr)
+    without, without_meta = enhance_classical(bgr, use_retinex=False)
+    assert "multiscale_retinex" in full_meta["stages"]
+    assert "multiscale_retinex" not in without_meta["stages"]
+    assert full_meta["output"]["mean_luminance"] > without_meta["output"]["mean_luminance"] + 8
+    assert not np.array_equal(full, without)
+
+
 def test_already_bright_image_is_not_blown_out():
     bgr = np.full((96, 128, 3), 180, dtype=np.uint8)
     bgr[20:60, 20:60] = (240, 230, 220)

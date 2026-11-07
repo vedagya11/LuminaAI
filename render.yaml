@@ -15,3 +15,7 @@ services:
         value: "24000000"
       - key: ALLOWED_ORIGINS
         sync: false
+      - key: ZERODCE_SCALE
+        value: "12"
+      - key: MAX_INFERENCE_SIDE
+        value: "1280"

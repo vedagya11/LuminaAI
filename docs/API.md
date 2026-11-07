@@ -1,70 +1,44 @@
 # API
 
-Base path: `/api`. Interactive schemas are served at `/docs` when the backend is running.
+Base path `/api`. Schemas are also at `/docs`.
 
-All errors use `{"detail": "..."}` and a specific status code.
+Errors use `{"detail": "..."}`.
 
 | Code | When |
 | --- | --- |
-| 400 | Unsupported type, empty file, corrupt bytes, extension/content mismatch, image under 8×8, unknown method |
-| 413 | Upload larger than `MAX_UPLOAD_BYTES`, or pixel count above `MAX_IMAGE_PIXELS` |
+| 400 | Bad type, empty file, corrupt bytes, extension mismatch, image under 8×8, unknown method, reference size mismatch |
+| 413 | Upload or pixel count over the configured limit |
 | 422 | Missing multipart fields |
-| 501 | Method exists but is not integrated (`deep_learning`, `hybrid`) |
-| 500 | Unexpected processing failure. The body does not include a traceback |
+| 501 | Method id exists but Zero-DCE++ did not load (`deep_learning`, `hybrid`) |
+| 500 | Unexpected processing failure, without a traceback in the body |
 
 ## `GET /api/health`
 
-```json
-{"status": "ok", "service": "LUMINA AI", "version": "1.0.0"}
-```
+`status`, `service`, `version`.
 
 ## `GET /api/info`
 
-Returns supported formats (`jpeg`, `jpg`, `png`, `webp`), the active upload and pixel limits, and every method. `available` is true only for Classical CV in this phase. The React app enables radios from this payload.
+Formats, upload limit, pixel limit, and methods. `available` for `deep_learning` and `hybrid` is true only after the weight file and PyTorch both check out. The description text changes with that state. The React cards use this payload.
 
 ## `POST /api/upload`
 
-Multipart field: `file`.
-
-The handler reads the body in 1 MiB chunks, stops past the size limit, checks the extension, writes a `lumina_<uuid>` file mode `0600` under the temp directory, and decodes it with Pillow (`load()`, EXIF transpose, still-frame check). The temp file is deleted before the response. Nothing is kept on disk.
-
-```json
-{
-  "request_id": "uuid",
-  "filename": "night.png",
-  "format": "png",
-  "width": 160,
-  "height": 120,
-  "size_bytes": 8421
-}
-```
-
-`filename` is the basename only.
+Multipart field `file`. Validates bytes, writes a unique `0600` temp file, decodes with Pillow, deletes the temp file, and returns id, basename, format, dimensions, and size.
 
 ## `POST /api/enhance`
 
-Multipart fields: `file`, `method`.
+Multipart fields:
 
-`method` must be an id from `/api/info`. Classical CV runs the pipeline in `docs/PIPELINE.md` and returns a JPEG (quality from `JPEG_QUALITY`, default 92) plus measurements.
+- `file` (required)
+- `method`: `classical`, `deep_learning`, or `hybrid`
+- `include_intermediates`: `true` or `false`
+- `reference`: optional same-size image
 
-```json
-{
-  "request_id": "uuid",
-  "method": "classical",
-  "width": 160,
-  "height": 120,
-  "input_bytes": 8421,
-  "output_bytes": 12004,
-  "processing_time_ms": 37.41,
-  "media_type": "image/jpeg",
-  "image_base64": "...",
-  "gamma": 0.61,
-  "stages": ["multiscale_retinex", "clahe", "luminance_unsharp", "highlight_rolloff"],
-  "input": {"mean_luminance": 21.4, "contrast_stddev": 8.2, "noise_sigma": 1.1},
-  "output": {"mean_luminance": 96.7, "contrast_stddev": 28.4, "noise_sigma": 2.4}
-}
-```
+The JSON result includes the JPEG as base64, `processing_time_ms` around the restorer only, input and output luminance statistics, `no_reference` metrics, and `full_reference`. Without `reference`, `full_reference.available` is false and PSNR, SSIM, and LPIPS are null.
 
-Upload and enhance each generate their own request id. Enhance does not look up a previous upload; send the image again. The browser does both calls so a corrupt file fails before the longer pipeline runs.
+`fusion_weights` is present for hybrid. `model` is present when Zero-DCE++ ran. `intermediates` is a list of named JPEGs only when requested. `gamma` is the mean of the classical gamma map, and null for the network-only method.
 
-Alpha is composited onto black. Animated WebP and GIF are rejected.
+## `POST /api/compare`
+
+Same file fields except `method`. Returns one entry per method. A method that did not load has `available: false`, `processing_time_ms: null`, an empty image, and `error` set to the loader reason. It does not contain a substitute image.
+
+`original_no_reference` is measured on the upload.

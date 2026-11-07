@@ -1,12 +1,41 @@
 # LUMINA AI
 
-LUMINA AI is a low-light image restoration web app for a computer vision hackathon (problem P1). A person uploads a dark, noisy photograph and downloads a version with lifted shadows, corrected color, local contrast, and retained detail.
+LUMINA AI restores underexposed photographs in the browser. You upload a dark, noisy image and download a result with lifted shadows, corrected color, local contrast, and a record of what was measured.
 
-This repository is the phase-1 foundation. Restoration is a real classical computer-vision pipeline in FastAPI. The React app calls that API. Zero-DCE is not integrated, PyTorch is not installed, and the Deep Learning and Hybrid modes cannot be selected.
+The studio can run three restorers:
+
+- **Classical CV** — multi-scale Retinex, a per-pixel gamma, CLAHE, edge-preserving denoise, adaptive gray-world balance, and highlight protection.
+- **Deep learning** — Zero-DCE++ with the authors' Epoch99 checkpoint, on CPU.
+- **Hybrid AI** — a spatial mix of those two results. The fusion weights are returned with the image.
+
+If the checkpoint or PyTorch is missing, Deep Learning and Hybrid AI stay disabled. Classical CV still runs. Scores that need a reference image are left empty instead of being guessed.
 
 ## Problem statement
 
-Robust low-light image restoration and enhancement: take underexposed, noisy images and return a natural result with better brightness, color, contrast, and preserved detail.
+Robust low-light image restoration: take an underexposed, noisy photograph and return a more natural image with better brightness, color, and contrast while keeping detail and limiting blown highlights.
+
+## Features
+
+- Drag-and-drop upload for JPG, JPEG, PNG, and WEBP, checked by content rather than the extension alone.
+- Preview, single-method enhancement, and a comparison of every method that actually loaded.
+- Before/after slider and a side-by-side view.
+- Optional intermediate images: illumination, Retinex, CLAHE, and the Zero-DCE++ curve map.
+- Download of the JPEG the API returned.
+- Quality dashboard: luminance, contrast, noise, saturation, percentiles, timing, file size, and fusion weights.
+- Optional PSNR and SSIM when you attach a same-size reference. NIQE is not computed.
+
+## Architecture
+
+```text
+React studio  -- VITE_API_BASE_URL -->  FastAPI
+                                         |- validation and temp files
+                                         |- classical pipeline
+                                         |- Zero-DCE++ (cached, CPU)
+                                         |- spatial hybrid fusion
+                                         '- measured metrics
+```
+
+Diagrams and module notes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Technology stack
 
@@ -15,43 +44,18 @@ Robust low-light image restoration and enhancement: take underexposed, noisy ima
 | Frontend | React 18, Vite, Tailwind CSS, JavaScript |
 | Backend | Python 3.11+, FastAPI, Uvicorn |
 | Vision | OpenCV, NumPy, Pillow |
-| Tests | pytest, FastAPI TestClient, httpx |
-| Frontend host | Vercel (config included; not deployed from this session) |
-| API host | Render ( `render.yaml` included; not deployed from this session) |
-| Source | Git repository, ready to push to GitHub |
+| Learned model | PyTorch, Zero-DCE++ Epoch99 |
+| Tests | pytest |
+| Frontend host | Vercel configuration included. Not deployed from this workspace. |
+| API host | Render configuration included. Not deployed from this workspace. |
 
-PyTorch and Zero-DCE are the planned phase-2 stack. They are omitted on purpose so the app cannot pretend a model ran.
+## Algorithms
 
-## Architecture
-
-```
-frontend/   React studio. API origin is VITE_API_BASE_URL.
-backend/    FastAPI. Classical pipeline in app/services/enhance.py.
-docs/       Pipeline, API, and deployment notes.
-```
-
-`GET /api/info` tells the UI which methods work. Only `classical` is `available: true`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/API.md](docs/API.md), and [docs/PIPELINE.md](docs/PIPELINE.md).
-
-The classical pipeline, in order:
-
-1. Laplacian MAD noise estimate and a bilateral filter when the frame is noisy.
-2. Clamped gray-world white balance.
-3. Multi-scale bright-channel illumination with adaptive gamma (Retinex). Gamma is 1 when the frame is already bright.
-4. CLAHE and a luminance unsharp mask.
-5. Highlight rolloff and limited chroma restoration.
-
-Shadows are lifted more than highlights. That is the check used in `backend/tests/test_enhance.py` against a global brightness add.
+Classical stages, Zero-DCE++ iteration count, and the fusion formula are written in [docs/PIPELINE.md](docs/PIPELINE.md). The short version: shadows are lifted by dividing luminance by a multi-scale illumination map and raising that illumination to a local gamma. A bright region keeps gamma 1. Zero-DCE++ applies eight quadratic curves from a pretrained network. Hybrid weights move toward the network in dark, clean pixels and toward the classical result where the frame is noisy or already bright.
 
 ## Installation
 
-Requirements: Python 3.11 or newer, Node.js 20 or newer.
-
-```bash
-git clone <your-github-url> LUMINA-AI
-cd LUMINA-AI
-```
-
-### Backend
+Python 3.11 or newer, and Node.js 20 or newer.
 
 ```bash
 cd backend
@@ -61,148 +65,142 @@ pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
-`.env` is optional for local defaults. Edit `ALLOWED_ORIGINS` if the browser origin is not `http://localhost:5173` or `http://127.0.0.1:5173`.
-
-### Frontend
-
 ```bash
 cd frontend
 npm install
-cp .env.example .env.development
 ```
 
-`frontend/.env.development` already sets `VITE_API_BASE_URL` for a backend on port 8000. Change that file if the API origin differs. Do not hardcode the origin in `src/`.
+`frontend/.env.development` sets `VITE_API_BASE_URL` for an API on port 8000. The source under `frontend/src` does not hardcode that host.
 
-## Backend startup
+PyTorch is a large install. The Zero-DCE++ file in `backend/models/` is about 52 KB.
 
-From `backend/`, with the virtualenv active:
+## Local execution
+
+API:
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+cd backend
+source .venv/bin/activate
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Production, including Render, must use the platform port:
+Site:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Open http://127.0.0.1:5173. Step-by-step demo notes are in [docs/DEMO.md](docs/DEMO.md).
+
+Production API command, including Render:
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-- API: `http://127.0.0.1:8000`
-- Health: `http://127.0.0.1:8000/api/health`
-- OpenAPI: `http://127.0.0.1:8000/docs`
-
-## Frontend startup
-
-From `frontend/`:
+Frontend production build:
 
 ```bash
-npm run dev
-```
-
-Vite serves the studio at `http://127.0.0.1:5173`.
-
-Production build:
-
-```bash
+cd frontend
 VITE_API_BASE_URL=https://your-api.example.com npm run build
-npm run preview
 ```
 
-Vite inlines `VITE_API_BASE_URL` at build time. Set it in Vercel before building, then redeploy if the API URL changes.
+Vite inlines `VITE_API_BASE_URL` at build time. Set it in Vercel before building, and rebuild if the API origin changes.
 
 ## Environment variables
 
-Backend (`backend/.env.example`):
-
-| Variable | Default | Role |
+| Variable | Where | Role |
 | --- | --- | --- |
-| `PORT` | `8000` | Process port. Render sets this. |
-| `ALLOWED_ORIGINS` | local Vite origins | CORS allow-list, comma-separated |
-| `MAX_UPLOAD_BYTES` | `10485760` | Upload limit |
-| `MAX_IMAGE_PIXELS` | `24000000` | Decompression-bomb guard |
-| `TEMP_DIR` | system temp `/lumina-ai` | Unique temp uploads |
-| `JPEG_QUALITY` | `92` | Enhanced JPEG quality |
+| `PORT` | API process | Bind port. Render sets this. |
+| `ALLOWED_ORIGINS` | API | Comma-separated browser origins for CORS. |
+| `MAX_UPLOAD_BYTES` | API | Upload limit. Default 10 MiB. |
+| `MAX_IMAGE_PIXELS` | API | Decompression-bomb guard. |
+| `TEMP_DIR` | API | Optional temp directory. |
+| `JPEG_QUALITY` | API | Enhanced JPEG quality. |
+| `ZERODCE_WEIGHTS` | API | Optional checkpoint path. |
+| `ZERODCE_SCALE` | API | Default 12. |
+| `MAX_INFERENCE_SIDE` | API | Default 1280. |
+| `VITE_API_BASE_URL` | Frontend build | API origin, no `/api` suffix. |
 
-Frontend:
-
-| Variable | Role |
-| --- | --- |
-| `VITE_API_BASE_URL` | API origin only, for example `http://127.0.0.1:8000`. No `/api` suffix and no trailing path. |
-
-No secrets are required and none are committed.
+No API secret is required. Do not commit a filled `.env`.
 
 ## API documentation
 
 | Method | Path | Behavior |
 | --- | --- | --- |
-| `GET` | `/api/health` | Status, service name, version |
-| `GET` | `/api/info` | Formats, size limits, methods and availability |
-| `POST` | `/api/upload` | Validate image bytes, return id, format, dimensions, size |
-| `POST` | `/api/enhance` | Run a method and return JPEG bytes (base64), timing, and measured stats |
+| `GET` | `/api/health` | Status, name, version |
+| `GET` | `/api/info` | Formats, limits, method availability |
+| `POST` | `/api/upload` | Validate an image and return dimensions |
+| `POST` | `/api/enhance` | Run one method |
+| `POST` | `/api/compare` | Run every available method |
 
-Details, status codes, and example bodies: [docs/API.md](docs/API.md).
+Details and status codes: [docs/API.md](docs/API.md). Live schemas: `http://127.0.0.1:8000/docs` while the API is running.
 
-`deep_learning` and `hybrid` return **501** with an explicit “not integrated” message. They do not return a brightened copy of the input.
+## Model details
+
+Zero-DCE++ Epoch99, from Chongyi Li, Chunle Guo, and Chen Change Loy, "Learning to Enhance Low-Light Image via Zero-Reference Deep Curve Estimation," IEEE TPAMI 2022.
+
+The checkpoint URL, SHA-256, and the missing upstream license are recorded in [backend/models/README.md](backend/models/README.md). The loader rejects the bundled filename if the hash changes. A missing file makes the learned modes return HTTP 501.
+
+## Dataset evaluation
+
+LOL, LOL-v2, and a FiveK export you prepare yourself can be scored with:
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m evaluation.evaluate /path/to/dataset
+python -m evaluation.ablation
+```
+
+The evaluator does not download data. If the folder has no pairs it exits without writing scores. Method: [docs/EVALUATION.md](docs/EVALUATION.md). This README does not list PSNR or SSIM figures because none have been produced against those datasets in this workspace.
+
+## Results
+
+Pytest covers health, uploads, corrupt and oversized files, temp cleanup, the classical shadow/highlight behavior, Retinex ablation, fusion weights, Zero-DCE++ when the checkpoint loads, and a 501 response when the checkpoint path is missing. Full-reference metrics stay null without a reference.
+
+There is no checked-in dataset table. Run the evaluator and use its printout.
+
+## Limitations
+
+- NIQE is not reported. LPIPS runs only if you install the optional package and it can fetch its network.
+- Zero-DCE++ can amplify noise and lift bright areas. Hybrid fusion is the control for that, not a guarantee.
+- The upstream checkpoint has no license file.
+- Large images are reduced before the network forward pass.
+- The app is not deployed. Render's smaller instances may fail while installing PyTorch.
+
+Failure notes: [docs/FAILURE_ANALYSIS.md](docs/FAILURE_ANALYSIS.md).
 
 ## Testing
 
-From `backend/` with the virtualenv active:
-
 ```bash
+cd backend
+source .venv/bin/activate
 pytest
 ```
-
-The suite covers health, info, PNG/JPEG/WEBP upload, text disguised as JPEG, corrupt JPEG, extension mismatch, empty file, oversized file, tiny image, temp-file deletion, classical enhancement (decoded output, dimensions, measured luminance, positive processing time), 501 for unfinished methods, and 422 for a missing file.
-
-Frontend production bundle:
 
 ```bash
 cd frontend
 npm run build
 ```
 
-GitHub Actions (`.github/workflows/test.yml`) runs pytest on Python 3.12 and `npm run build`.
+## Deployment instructions
 
-## Deployment
+These steps prepare a public deploy. They do not mean a public URL exists.
 
-These steps prepare a public deployment. They do not, by themselves, mean a public URL exists.
+### Render
 
-### Backend on Render
+1. Push the repository, including `backend/models/zerodce_pp_epoch99.pth`.
+2. Create a web service from `render.yaml`. Root directory is `backend`. Health check is `/api/health`. Start command is `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+3. Set `ALLOWED_ORIGINS` to the exact Vercel origin.
+4. Use an instance with enough memory to install PyTorch.
+5. Open `https://<service>/api/health` and `https://<service>/api/info` before pointing the site at it. `deep_learning` should be `available: true` when the checkpoint shipped.
 
-1. Push this repository to GitHub.
-2. Create a Render web service from the repo. `render.yaml` sets root directory `backend`, the install command, the health check `/api/health`, and the start command `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
-3. Set `ALLOWED_ORIGINS` to the exact Vercel origin (scheme + host, no path), comma-separated if you also want local Vite.
-4. Deploy and open `https://<service>/api/health` before pointing the frontend at it.
+### Vercel
 
-`backend/runtime.txt` asks for Python 3.12.7.
+1. Import the same repository and set the root directory to `frontend`.
+2. Set `VITE_API_BASE_URL` to the Render origin, without `/api`.
+3. Deploy. `frontend/vercel.json` sends unknown paths to `index.html`.
 
-### Frontend on Vercel
-
-1. Import the same GitHub repository.
-2. Set the project root directory to `frontend`. Framework preset: Vite.
-3. Set `VITE_API_BASE_URL` to the Render origin, without `/api`.
-4. Deploy. `frontend/vercel.json` sends non-file routes to `index.html`.
-
-### After both are live
-
-Call `GET /api/health` and `GET /api/info` on the public API. Upload a dark JPEG through the public site, confirm the before/after image and the statistics, and download the JPEG. If the browser reports a network error, the usual cause is a missing `VITE_API_BASE_URL` rebuild or an `ALLOWED_ORIGINS` value that does not match the Vercel origin.
-
-## Local demo flow
-
-1. Start the API on port 8000.
-2. Start Vite.
-3. Drop a JPG, JPEG, PNG, or WEBP.
-4. Leave Classical CV selected. The other two cards stay disabled.
-5. Choose **Enhance image**. The comparison slider and statistics come from the JSON response.
-6. Choose **Download enhanced image**.
-
-## Project layout
-
-```
-LUMINA-AI/
-  frontend/          React studio
-  backend/           FastAPI app and pytest suite
-  docs/              Architecture, API, pipeline
-  render.yaml        Render service definition
-  README.md
-```
+After both are live, enhance one dark image on the public site and confirm the dashboard numbers change with the photo. A browser network error is usually a missing rebuild of `VITE_API_BASE_URL` or an `ALLOWED_ORIGINS` value that does not match the site.

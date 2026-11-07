@@ -1,17 +1,14 @@
 """Classical low-light restoration.
 
-This is a pixel pipeline, not a brightness slider and not a neural network.
-Illumination is estimated per pixel and lifted separately from reflectance,
-which is the Retinex model used by classical low-light work (Jobson MSR,
-bright-channel illumination). Contrast is then local (CLAHE), and color is
-corrected with a clamped gray-world assumption (Buchsbaum).
-
-Zero-DCE and any hybrid learned stage are intentionally absent.
+Illumination is estimated per pixel and lifted with a local gamma, which is the
+Retinex separation used by classical low-light work (Jobson multi-scale Retinex,
+bright-channel illumination). A log-domain multi-scale residual restores local
+detail without acting as a global brightness offset. Contrast is then local
+(CLAHE), color uses a luminance-weighted gray-world balance, and pixels that
+were already near white are blended back toward the original.
 """
 
 from __future__ import annotations
-
-import math
 
 import cv2
 import numpy as np
@@ -40,6 +37,12 @@ def measure_luminance(y_u8: np.ndarray) -> dict[str, float]:
     }
 
 
+def _replace_luma(bgr: np.ndarray, luma: np.ndarray) -> np.ndarray:
+    ycrcb = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb)
+    ycrcb[:, :, 0] = luma
+    return cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+
+
 def _denoise(bgr: np.ndarray, sigma: float) -> tuple[np.ndarray, bool]:
     """Bilateral filter. Strength follows the measured noise; clean images are left alone."""
 
@@ -50,18 +53,23 @@ def _denoise(bgr: np.ndarray, sigma: float) -> tuple[np.ndarray, bool]:
     return filtered, True
 
 
-def _gray_world(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
-    """Scale BGR channels toward a common mean. Gains are clamped so a strong cast cannot explode."""
+def _gray_world(bgr: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Gray-world gains, weighted toward brighter pixels when the frame is not mostly black."""
 
     pixels = bgr.astype(np.float32)
-    means = pixels.reshape(-1, 3).mean(axis=0)
+    luma = _luminance(bgr).astype(np.float32)
+    weight = np.clip((luma - 12.0) / 48.0, 0.0, 1.0)
+    if float(weight.mean()) < 0.08:
+        means = pixels.reshape(-1, 3).mean(axis=0)
+    else:
+        means = (pixels * weight[..., None]).sum(axis=(0, 1)) / float(weight.sum())
     gray = float(means.mean())
     gains = gray / np.clip(means, 1.0, None)
     gains = np.clip(gains, 0.75, 1.35).astype(np.float32)
     if float(np.max(np.abs(gains - 1.0))) < 0.03:
-        return bgr, np.ones(3, dtype=np.float32), False
+        return bgr, False
     corrected = np.clip(pixels * gains.reshape(1, 1, 3), 0, 255)
-    return corrected.astype(np.uint8), gains, True
+    return corrected.astype(np.uint8), True
 
 
 def _illumination(bgr: np.ndarray) -> np.ndarray:
@@ -79,25 +87,46 @@ def _illumination(bgr: np.ndarray) -> np.ndarray:
     return np.clip(illumination, 1e-3, 1.0)
 
 
-def _adaptive_gamma(illumination: np.ndarray) -> float:
-    """Choose gamma so a dark mean illumination moves toward mid gray.
+def _gamma_map(illumination: np.ndarray) -> np.ndarray:
+    """Per-pixel gamma. Dark illumination is lifted; bright illumination stays at 1.
 
-    Already-bright images keep gamma = 1 so highlights are not pushed further.
+    A single gamma computed from the frame mean cannot lift a shadow that sits
+    next to a large bright region. The exponent is chosen so local illumination
+    moves toward mid gray, then clipped to [0.35, 0.92].
     """
 
-    mean_illumination = float(np.mean(illumination))
     target = 0.52
-    if mean_illumination >= target - 0.02:
-        return 1.0
-    gamma = math.log(target) / math.log(max(mean_illumination, 1e-3))
-    return float(np.clip(gamma, 0.35, 0.92))
+    gamma = np.ones_like(illumination, dtype=np.float32)
+    dark = illumination < (target - 0.02)
+    if not np.any(dark):
+        return gamma
+    safe = np.clip(illumination, 1e-3, 0.999)
+    raw = np.log(target) / np.log(safe)
+    gamma[dark] = np.clip(raw[dark], 0.35, 0.92)
+    return gamma
 
 
-def _apply_retinex(y_u8: np.ndarray, illumination: np.ndarray, gamma: float) -> np.ndarray:
+def _apply_retinex(y_u8: np.ndarray, illumination: np.ndarray, gamma_map: np.ndarray) -> np.ndarray:
     luminance = y_u8.astype(np.float32) / 255.0
-    adjusted = np.power(illumination, gamma)
-    restored = luminance / illumination * adjusted
+    adjusted = np.power(illumination, gamma_map)
+    restored = luminance / np.maximum(illumination, 1e-3) * adjusted
     return np.clip(restored * 255.0, 0, 255).astype(np.uint8)
+
+
+def _msr_detail(y_u8: np.ndarray) -> np.ndarray:
+    """Zero-mean log-domain multi-scale Retinex residual (Jobson)."""
+
+    luminance = np.clip(y_u8.astype(np.float32) / 255.0, 1e-3, 1.0)
+    log_luminance = np.log(luminance)
+    height, width = luminance.shape
+    sigma_cap = max(3.0, min(height, width) / 4.0)
+    residual = np.zeros_like(luminance)
+    for weight, scale in zip((0.5, 0.3, 0.2), (15.0, 80.0, 250.0)):
+        sigma = float(max(2.0, min(scale, sigma_cap)))
+        blurred = np.clip(cv2.GaussianBlur(luminance, (0, 0), sigmaX=sigma, sigmaY=sigma), 1e-3, 1.0)
+        residual += weight * (log_luminance - np.log(blurred))
+    residual -= float(residual.mean())
+    return residual
 
 
 def _clahe(y_u8: np.ndarray) -> np.ndarray:
@@ -141,7 +170,23 @@ def _restore_chroma(ycrcb: np.ndarray, base_y: np.ndarray, final_y: np.ndarray) 
     return restored
 
 
-def enhance_classical(bgr: np.ndarray) -> tuple[np.ndarray, dict]:
+def _colorize_illumination(illumination: np.ndarray) -> np.ndarray:
+    level = np.clip(illumination * 255.0, 0, 255).astype(np.uint8)
+    return cv2.applyColorMap(level, cv2.COLORMAP_INFERNO)
+
+
+def enhance_classical(
+    bgr: np.ndarray,
+    *,
+    include_intermediates: bool = False,
+    use_denoise: bool = True,
+    use_gray_world: bool = True,
+    use_retinex: bool = True,
+    use_clahe: bool = True,
+    use_unsharp: bool = True,
+    use_highlight_rolloff: bool = True,
+    use_chroma_restore: bool = True,
+) -> tuple[np.ndarray, dict]:
     """Run the classical pipeline and return the BGR result plus measured metadata."""
 
     if bgr.ndim != 3 or bgr.shape[2] != 3:
@@ -152,45 +197,79 @@ def enhance_classical(bgr: np.ndarray) -> tuple[np.ndarray, dict]:
     original_y = _luminance(bgr)
     input_stats = measure_luminance(original_y)
     sigma = estimate_noise_sigma(original_y)
-    stages: list[str] = []
+    stages: list[str] = ["noise_estimate"]
+    intermediates: dict[str, np.ndarray] = {}
 
-    current, denoised = _denoise(bgr, sigma)
-    if denoised:
-        stages.append("bilateral_denoise")
+    current = bgr
+    if use_denoise:
+        current, denoised = _denoise(current, sigma)
+        if denoised:
+            stages.append("bilateral_denoise")
+            if include_intermediates:
+                intermediates["denoised"] = current.copy()
 
-    current, _gains, balanced = _gray_world(current)
-    if balanced:
-        stages.append("gray_world")
+    if use_gray_world:
+        current, balanced = _gray_world(current)
+        if balanced:
+            stages.append("adaptive_white_balance")
 
-    illumination = _illumination(current)
-    gamma = _adaptive_gamma(illumination)
     ycrcb = cv2.cvtColor(current, cv2.COLOR_BGR2YCrCb)
     base_y = ycrcb[:, :, 0].copy()
     luminance = base_y
-    if gamma < 0.999:
-        luminance = _apply_retinex(base_y, illumination, gamma)
-        stages.append("multiscale_retinex")
+    gamma_value = 1.0
+    if use_retinex:
+        illumination = _illumination(current)
+        gamma_map = _gamma_map(illumination)
+        if include_intermediates:
+            intermediates["illumination"] = _colorize_illumination(illumination)
+        if float(gamma_map.min()) < 0.999:
+            luminance = _apply_retinex(base_y, illumination, gamma_map)
+            detail = _msr_detail(base_y)
+            shadow = np.clip((80.0 - base_y.astype(np.float32)) / 80.0, 0.0, 1.0)
+            delta = detail * 18.0 * shadow
+            if float(np.max(np.abs(delta))) > 0.5:
+                luminance = np.clip(luminance.astype(np.float32) + delta, 0, 255).astype(np.uint8)
+                stages.append("msr_detail")
+            stages.append("multiscale_retinex")
+            gamma_value = round(float(gamma_map.mean()), 4)
+            if include_intermediates:
+                intermediates["retinex"] = _replace_luma(current, luminance)
 
-    luminance = _clahe(luminance)
-    stages.append("clahe")
-    luminance = _unsharp(luminance)
-    stages.append("luminance_unsharp")
-    luminance = _protect_highlights(luminance, original_y)
-    stages.append("highlight_rolloff")
+    if use_clahe:
+        luminance = _clahe(luminance)
+        stages.append("clahe")
+        if include_intermediates:
+            intermediates["clahe"] = _replace_luma(current, luminance)
 
-    original_chroma = ycrcb[:, :, 1].copy()
-    ycrcb = _restore_chroma(ycrcb, base_y, luminance)
-    if not np.array_equal(ycrcb[:, :, 1], original_chroma):
-        stages.append("chroma_restore")
+    if use_unsharp:
+        luminance = _unsharp(luminance)
+        stages.append("luminance_unsharp")
+
+    if use_highlight_rolloff:
+        luminance = _protect_highlights(luminance, original_y)
+        stages.append("highlight_rolloff")
+
+    if use_chroma_restore:
+        original_chroma = ycrcb[:, :, 1].copy()
+        ycrcb = _restore_chroma(ycrcb, base_y, luminance)
+        if not np.array_equal(ycrcb[:, :, 1], original_chroma):
+            stages.append("chroma_restore")
+    else:
+        ycrcb = ycrcb.copy()
+        ycrcb[:, :, 0] = luminance
 
     enhanced = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
     output_y = _luminance(enhanced)
-    return enhanced, {
-        "gamma": round(gamma, 4),
+    meta = {
+        "gamma": gamma_value,
         "stages": stages,
         "input": input_stats,
         "output": measure_luminance(output_y),
+        "fusion_weights": None,
+        "model": None,
+        "intermediates": intermediates if include_intermediates else None,
     }
+    return enhanced, meta
 
 
 def encode_jpeg(bgr: np.ndarray, quality: int) -> bytes:

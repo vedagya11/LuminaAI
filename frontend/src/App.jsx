@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { downloadEncodedImage, enhanceImage, getHealth, getInfo, uploadImage } from "./api/client";
+import { compareImages, downloadEncodedImage, enhanceImage, getHealth, getInfo, uploadImage } from "./api/client";
 import Comparison from "./components/Comparison";
 import Footer from "./components/Footer";
 import Hero from "./components/Hero";
+import IntermediateGallery from "./components/IntermediateGallery";
 import ModeSelect from "./components/ModeSelect";
 import Navbar from "./components/Navbar";
+import ResultGrid from "./components/ResultGrid";
 import StatsPanel from "./components/StatsPanel";
+import Technology from "./components/Technology";
 import Uploader from "./components/Uploader";
 
 const EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
@@ -16,11 +19,16 @@ export default function App() {
   const [info, setInfo] = useState(null);
   const [method, setMethod] = useState("");
   const [file, setFile] = useState(null);
+  const [reference, setReference] = useState(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [uploadMeta, setUploadMeta] = useState(null);
-  const [result, setResult] = useState(null);
+  const [results, setResults] = useState([]);
+  const [originalMetrics, setOriginalMetrics] = useState(null);
+  const [selected, setSelected] = useState("");
   const [phase, setPhase] = useState("idle");
   const [error, setError] = useState("");
+  const [includeIntermediates, setIncludeIntermediates] = useState(false);
+  const [view, setView] = useState("slider");
 
   useEffect(() => {
     let cancelled = false;
@@ -46,22 +54,18 @@ export default function App() {
     };
   }, [previewUrl]);
 
+  const selectedResult = results.find((item) => item.method === selected && item.available);
   const afterUrl = useMemo(() => {
-    if (!result?.image_base64) return "";
-    return `data:${result.media_type};base64,${result.image_base64}`;
-  }, [result]);
-
+    if (!selectedResult?.image_base64) return "";
+    return `data:${selectedResult.media_type};base64,${selectedResult.image_base64}`;
+  }, [selectedResult]);
   const selectedMethod = info?.methods?.find((item) => item.id === method);
   const busy = phase !== "idle";
 
   function localProblem(next) {
     const extension = next.name.includes(".") ? next.name.slice(next.name.lastIndexOf(".")).toLowerCase() : "";
-    if (!EXTENSIONS.includes(extension)) {
-      return "Upload a JPG, JPEG, PNG, or WEBP image.";
-    }
-    if (!next.size) {
-      return "The selected file is empty.";
-    }
+    if (!EXTENSIONS.includes(extension)) return "Upload a JPG, JPEG, PNG, or WEBP image.";
+    if (!next.size) return "The selected file is empty.";
     if (info?.max_upload_bytes && next.size > info.max_upload_bytes) {
       return `File exceeds the ${info.max_upload_bytes} byte upload limit.`;
     }
@@ -70,7 +74,9 @@ export default function App() {
 
   async function onFile(next) {
     const problem = localProblem(next);
-    setResult(null);
+    setResults([]);
+    setOriginalMetrics(null);
+    setSelected("");
     setUploadMeta(null);
     if (problem) {
       setFile(null);
@@ -83,8 +89,7 @@ export default function App() {
     setError("");
     setPhase("uploading");
     try {
-      const meta = await uploadImage(next);
-      setUploadMeta(meta);
+      setUploadMeta(await uploadImage(next));
     } catch (err) {
       setFile(null);
       setPreviewUrl("");
@@ -98,7 +103,10 @@ export default function App() {
     setFile(null);
     setPreviewUrl("");
     setUploadMeta(null);
-    setResult(null);
+    setResults([]);
+    setOriginalMetrics(null);
+    setSelected("");
+    setReference(null);
     setError("");
   }
 
@@ -107,10 +115,32 @@ export default function App() {
     setError("");
     setPhase("enhancing");
     try {
-      const enhanced = await enhanceImage(file, selectedMethod.id);
-      setResult(enhanced);
+      const enhanced = await enhanceImage(file, selectedMethod.id, { includeIntermediates, reference });
+      setResults((current) => {
+        const next = current.filter((item) => item.method !== enhanced.method);
+        return [...next, enhanced];
+      });
+      setSelected(enhanced.method);
+      setView("slider");
     } catch (err) {
-      setResult(null);
+      setError(err.message);
+    } finally {
+      setPhase("idle");
+    }
+  }
+
+  async function onCompare() {
+    if (!file) return;
+    setError("");
+    setPhase("comparing");
+    try {
+      const compared = await compareImages(file, { includeIntermediates, reference });
+      setResults(compared.results);
+      setOriginalMetrics(compared.original_no_reference);
+      const first = compared.results.find((item) => item.available);
+      setSelected(first ? first.method : "");
+      setView("grid");
+    } catch (err) {
       setError(err.message);
     } finally {
       setPhase("idle");
@@ -118,82 +148,141 @@ export default function App() {
   }
 
   function onDownload() {
-    if (!result) return;
+    if (!selectedResult) return;
     const stem = (file?.name || "lumina").replace(/\.[^.]+$/, "");
     downloadEncodedImage({
-      imageBase64: result.image_base64,
-      mediaType: result.media_type,
-      filename: `${stem}-lumina.jpg`,
+      imageBase64: selectedResult.image_base64,
+      mediaType: selectedResult.media_type,
+      filename: `${stem}-${selectedResult.method}.jpg`,
     });
   }
 
+  const statusText = phase === "enhancing"
+    ? "Enhancing"
+    : phase === "comparing"
+      ? "Comparing methods"
+      : phase === "uploading"
+        ? "Validating"
+        : "Enhance";
+
   return (
-    <div id="top" className="min-h-screen">
+    <div id="top" className="min-h-screen bg-bg">
       <Navbar health={health} />
       <main>
         <Hero />
-        <section id="studio" className="mx-auto max-w-6xl px-4 pb-8">
-          <Uploader
-            inputRef={inputRef}
-            previewUrl={previewUrl}
-            file={file}
-            uploadMeta={uploadMeta}
-            phase={phase}
-            onFile={onFile}
-            onClear={onClear}
-          />
-          <ModeSelect
-            methods={info?.methods}
-            method={method}
-            onChange={(next) => {
-              setMethod(next);
-              setResult(null);
-            }}
-            disabled={busy}
-          />
-          {error && (
-            <p role="alert" className="mt-4 rounded-2xl border border-rose-300/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
-              {error}
-            </p>
+        <section id="studio" className="mx-auto max-w-6xl px-4 py-8">
+          <h2 className="text-base font-medium">Enhancement studio</h2>
+          <div className="mt-4 grid items-start gap-4 lg:grid-cols-2">
+            <Uploader
+              inputRef={inputRef}
+              previewUrl={previewUrl}
+              file={file}
+              uploadMeta={uploadMeta}
+              phase={phase}
+              maxBytes={info?.max_upload_bytes}
+              onFile={onFile}
+              onClear={onClear}
+            />
+            <div className="rounded-md border border-line bg-panel p-4 shadow-card">
+              <ModeSelect methods={info?.methods} method={method} onChange={setMethod} disabled={busy} />
+              <div className="mt-4 grid gap-3">
+                <label className="text-xs text-muted">
+                  Optional reference for PSNR and SSIM
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                    className="mt-1 block w-full text-xs text-ink"
+                    onChange={(event) => setReference(event.target.files?.[0] || null)}
+                  />
+                </label>
+                <label className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={includeIntermediates}
+                    onChange={(event) => setIncludeIntermediates(event.target.checked)}
+                    className="mt-1"
+                  />
+                  <span>
+                    <span className="block text-ink">Include intermediate images</span>
+                    <span className="mt-0.5 block text-xs text-muted">Illumination, denoise, Retinex, CLAHE, and curve maps from the stages that run.</span>
+                  </span>
+                </label>
+              </div>
+              {error && (
+                <p role="alert" className="mt-4 border border-danger/40 bg-card px-3 py-2 text-sm text-danger">
+                  {error}
+                </p>
+              )}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={onEnhance}
+                  disabled={!uploadMeta || !selectedMethod?.available || busy}
+                  className="inline-flex items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busy && <span className="spin inline-block h-3 w-3 rounded-full border-2 border-white/30 border-t-white" />}
+                  {statusText}
+                </button>
+                <button
+                  type="button"
+                  onClick={onCompare}
+                  disabled={!uploadMeta || busy}
+                  className="rounded-md border border-line bg-card px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Compare available methods
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section id="comparison" className="mx-auto max-w-6xl px-4 py-8">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-base font-medium">Comparison</h2>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => setView("slider")} className={viewButton(view === "slider")}>Before and after</button>
+              <button type="button" onClick={() => setView("grid")} className={viewButton(view === "grid")}>Side by side</button>
+              <button
+                type="button"
+                onClick={onDownload}
+                disabled={!selectedResult || busy}
+                className="rounded-md border border-line bg-card px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Download
+              </button>
+            </div>
+          </div>
+          {results.filter((item) => item.available).length > 1 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {results.filter((item) => item.available).map((item) => (
+                <button key={item.method} type="button" onClick={() => setSelected(item.method)} className={viewButton(selected === item.method)}>
+                  {item.method.replaceAll("_", " ")} · {item.processing_time_ms} ms
+                </button>
+              ))}
+            </div>
           )}
-          <div className="mt-5 flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={onEnhance}
-              disabled={!uploadMeta || !selectedMethod?.available || busy}
-              className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-500 to-sky-500 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {phase === "enhancing" && <span className="spin inline-block h-3.5 w-3.5 rounded-full border-2 border-white/40 border-t-white" />}
-              {phase === "enhancing" ? "Enhancing" : phase === "uploading" ? "Validating" : "Enhance image"}
-            </button>
-            <button
-              type="button"
-              onClick={onDownload}
-              disabled={!result || busy}
-              className="rounded-full border border-white/15 px-5 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Download enhanced image
-            </button>
-          </div>
-          {result && previewUrl && <Comparison beforeUrl={previewUrl} afterUrl={afterUrl} />}
-          <div className="mt-6">
-            <StatsPanel result={result} />
+          <div className="mt-4">
+            {view === "slider" && selectedResult && previewUrl && afterUrl && (
+              <Comparison beforeUrl={previewUrl} afterUrl={afterUrl} />
+            )}
+            {view === "grid" && previewUrl && results.length > 0 && (
+              <ResultGrid originalUrl={previewUrl} results={results} selected={selected} onSelect={setSelected} />
+            )}
+            {!(selectedResult && previewUrl) && (
+              <p className="border border-line bg-card px-4 py-16 text-center text-sm text-muted">
+                The original and enhanced images appear here after a restoration.
+              </p>
+            )}
           </div>
         </section>
-        <section id="pipeline" className="mx-auto grid max-w-6xl gap-4 px-4 py-8 md:grid-cols-3">
-          {[
-            ["1 · Denoise", "Laplacian noise estimate, then a bilateral filter only when the photograph is actually noisy."],
-            ["2 · Retinex", "Multi-scale bright-channel illumination is lifted with an adaptive gamma. Reflectance stays separate from brightness."],
-            ["3 · Contrast and color", "CLAHE and a luminance unsharp mask restore local detail. Gray-world gains are clamped, and highlights already near white are protected."],
-          ].map(([title, copy]) => (
-            <article key={title} className="rounded-3xl border border-white/10 bg-charcoal/70 p-5">
-              <h2 className="font-semibold">{title}</h2>
-              <p className="mt-2 text-sm leading-relaxed text-mist">{copy}</p>
-            </article>
-          ))}
-        </section>
+        <StatsPanel result={selectedResult} original={originalMetrics} />
+        <IntermediateGallery images={selectedResult?.intermediates} originalUrl={previewUrl} finalUrl={afterUrl} />
+        <Technology />
       </main>
       <Footer />
     </div>
   );
+}
+
+function viewButton(active) {
+  return `rounded-md px-3 py-1.5 text-sm ${active ? "bg-accent text-white" : "border border-line bg-card text-muted"}`;
 }

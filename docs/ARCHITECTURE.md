@@ -1,42 +1,60 @@
 # Architecture
 
-```
-browser (React, Vite)
-    |  VITE_API_BASE_URL
-    |  GET  /api/health
-    |  GET  /api/info
-    |  POST /api/upload
-    |  POST /api/enhance
-    v
-FastAPI
-    ├─ config.Settings          environment only
-    ├─ images.py                size, type, Pillow decode, unique temp file
-    ├─ methods.py               classical available; deep learning and hybrid refused
-    └─ enhance.py               OpenCV / NumPy classical pipeline
+```mermaid
+flowchart LR
+  browser[React studio]
+  api[FastAPI]
+  validate[Image validation]
+  classical[Classical CV]
+  dce[Zero-DCE++ CPU]
+  hybrid[Spatial fusion]
+  metrics[Metrics]
+  browser -->|VITE_API_BASE_URL| api
+  api --> validate
+  validate --> classical
+  validate --> dce
+  classical --> hybrid
+  dce --> hybrid
+  classical --> metrics
+  dce --> metrics
+  hybrid --> metrics
 ```
 
-The frontend never chooses a result locally. Mode buttons that the info endpoint marks `available: false` are disabled, and the matching API call returns 501 if it is forged.
+```mermaid
+flowchart TD
+  upload[Validated BGR image]
+  noise[Noise estimate]
+  denoise[Bilateral denoise if noisy]
+  wb[Adaptive gray world]
+  illum[Multi-scale illumination]
+  gamma[Per-pixel gamma]
+  msr[Zero-mean MSR detail]
+  clahe[CLAHE and unsharp]
+  protect[Highlight rolloff]
+  upload --> noise --> denoise --> wb --> illum --> gamma --> msr --> clahe --> protect
+```
 
-Images are not stored after the response. Temp files use `tempfile.mkstemp` with a UUID prefix and are removed in a `finally` block. User filenames are not used as paths.
+The browser never synthesizes a result. Mode buttons follow `GET /api/info`. Temp files use `tempfile.mkstemp` with a UUID prefix and are removed in a `finally` block.
 
 ## Configuration
 
-| Variable | Where | Purpose |
-| --- | --- | --- |
-| `PORT` | Backend process | Bind port. Render injects this. Local default 8000. |
-| `ALLOWED_ORIGINS` | Backend | Comma-separated CORS origins. |
-| `MAX_UPLOAD_BYTES` | Backend | Raw upload ceiling. Default 10485760. |
-| `MAX_IMAGE_PIXELS` | Backend | Pillow decompression-bomb ceiling. Default 24000000. |
-| `TEMP_DIR` | Backend | Optional temp directory. |
-| `JPEG_QUALITY` | Backend | Enhanced JPEG quality, 70–95. Default 92. |
-| `VITE_API_BASE_URL` | Frontend build | API origin, no `/api` suffix. Inlined when Vite builds. |
-
-There is no API key in this phase because the pipeline is local classical vision. Do not add a secret to the repository to stand in for one.
+| Variable | Role |
+| --- | --- |
+| `PORT` | Uvicorn port. Render sets it. |
+| `ALLOWED_ORIGINS` | Comma-separated CORS origins. |
+| `MAX_UPLOAD_BYTES` | Raw upload ceiling. Default 10485760. |
+| `MAX_IMAGE_PIXELS` | Pillow decompression ceiling. Default 24000000. |
+| `TEMP_DIR` | Optional temp directory. |
+| `JPEG_QUALITY` | Result JPEG quality, 70–95. Default 92. |
+| `ZERODCE_WEIGHTS` | Optional checkpoint path. Default is the bundled Epoch99 file. |
+| `ZERODCE_SCALE` | Curve downsample factor. Default 12, matching the authors. |
+| `MAX_INFERENCE_SIDE` | Long-side cap for the network. Default 1280. |
+| `VITE_API_BASE_URL` | API origin baked in by Vite. No `/api` suffix. |
 
 ## Deployment shape
 
-- Frontend: Vercel project, root directory `frontend`. `vercel.json` rewrites unknown paths to `index.html`. Set `VITE_API_BASE_URL` before the production build.
-- Backend: Render web service from `render.yaml`, root directory `backend`, start `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
-- After the API has a public origin, set `ALLOWED_ORIGINS` to the Vercel origin and redeploy the API. Then set `VITE_API_BASE_URL` to the API origin and redeploy the frontend.
+Frontend: Vercel project rooted at `frontend`. `vercel.json` rewrites unknown paths to `index.html`. Set `VITE_API_BASE_URL` to the Render origin before the production build.
 
-Those hosted URLs are not created by this repository until someone with Vercel and Render access deploys it.
+Backend: Render service from `render.yaml`, root `backend`, health check `/api/health`, start `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. Set `ALLOWED_ORIGINS` to the Vercel origin. The checkpoint is about 52 KB and is intended to ship with the backend tree. PyTorch is the large install. A small Render instance can run out of memory while installing it; use an instance that can complete `pip install -r requirements.txt`.
+
+This repository has not been deployed. A public URL is not claimed.

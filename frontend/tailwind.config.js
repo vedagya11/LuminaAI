@@ -4,16 +4,21 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#070b14",
-        charcoal: "#101726",
-        navy: "#162033",
-        mist: "#9aa8c7",
+        bg: "#101114",
+        panel: "#17191E",
+        card: "#1C1F25",
+        line: "#2B2E36",
+        ink: "#F5F5F5",
+        muted: "#9A9DA7",
+        accent: "#8B7CF6",
+        success: "#42B883",
+        danger: "#EF6461",
       },
       fontFamily: {
-        sans: ["Outfit", "ui-sans-serif", "system-ui", "sans-serif"],
+        sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
       },
       boxShadow: {
-        glow: "0 0 80px rgba(96, 80, 255, 0.18)",
+        card: "0 1px 2px rgba(0, 0, 0, 0.28)",
       },
     },
   },

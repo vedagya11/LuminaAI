@@ -1,29 +1,18 @@
 export default function Hero() {
   return (
-    <section className="mx-auto max-w-6xl px-4 pb-8 pt-16 sm:pt-24">
-      <p className="rise text-sm uppercase tracking-[0.22em] text-sky-300">Computer vision · P1</p>
-      <h1 className="rise delay-1 mt-4 max-w-4xl text-5xl font-semibold leading-[1.05] tracking-tight sm:text-7xl">
-        Bring Darkness to{" "}
-        <span className="bg-gradient-to-r from-violet-300 via-fuchsia-200 to-sky-300 bg-clip-text text-transparent">
-          Light.
-        </span>
+    <section className="mx-auto max-w-6xl px-4 pb-6 pt-14 sm:pt-16">
+      <p className="text-xs font-medium tracking-[0.16em] text-muted">AI-POWERED IMAGE RESTORATION</p>
+      <h1 className="mt-3 max-w-xl text-3xl font-medium tracking-tight text-ink sm:text-4xl">
+        Bring Darkness to Light.
       </h1>
-      <p className="rise delay-2 mt-5 max-w-2xl text-lg text-mist sm:text-xl">
-        Intelligent AI-powered low-light image restoration.
+      <p className="mt-3 max-w-xl text-sm leading-6 text-muted sm:text-base">
+        Restore details, recover natural illumination and enhance low-light photographs using classical computer vision and deep learning.
       </p>
-      <div className="mt-8 flex flex-wrap gap-3">
-        <a
-          href="#studio"
-          className="rounded-full bg-gradient-to-r from-violet-500 to-sky-500 px-5 py-2.5 text-sm font-semibold text-white shadow-glow"
-        >
-          Enhance an image
+      <div className="mt-6 flex flex-wrap items-center gap-4">
+        <a href="#studio" className="rounded-md bg-accent px-3.5 py-2 text-sm font-medium text-white shadow-card">
+          Open Enhancement Studio
         </a>
-        <a
-          href="#pipeline"
-          className="rounded-full border border-white/15 px-5 py-2.5 text-sm text-mist hover:border-white/30 hover:text-white"
-        >
-          How restoration works
-        </a>
+        <p className="text-sm text-muted">Classical CV | Deep Learning | Hybrid AI</p>
       </div>
     </section>
   );

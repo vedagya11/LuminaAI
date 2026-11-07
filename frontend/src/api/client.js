@@ -74,11 +74,27 @@ export function uploadImage(file) {
   return request("/api/upload", { method: "POST", body });
 }
 
-export function enhanceImage(file, method) {
+function appendImage(body, field, file) {
+  if (file) {
+    body.append(field, file, file.name);
+  }
+}
+
+export function enhanceImage(file, method, options = {}) {
   const body = new FormData();
   body.append("file", file, file.name);
   body.append("method", method);
+  body.append("include_intermediates", options.includeIntermediates ? "true" : "false");
+  appendImage(body, "reference", options.reference);
   return request("/api/enhance", { method: "POST", body });
+}
+
+export function compareImages(file, options = {}) {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  body.append("include_intermediates", options.includeIntermediates ? "true" : "false");
+  appendImage(body, "reference", options.reference);
+  return request("/api/compare", { method: "POST", body });
 }
 
 export function downloadEncodedImage({ imageBase64, mediaType, filename }) {

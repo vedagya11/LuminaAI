@@ -17,7 +17,7 @@ def test_health(client):
     body = response.json()
     assert body["status"] == "ok"
     assert body["service"] == "LUMINA AI"
-    assert body["version"] == "1.0.0"
+    assert body["version"] == "1.1.0"
 
 
 def test_root(client):
@@ -26,16 +26,19 @@ def test_root(client):
     assert response.json()["health"] == "/api/health"
 
 
-def test_info_lists_only_classical_as_available(client):
+def test_info_matches_loaded_methods(client):
+    from app.services.zerodce import get_model_status
+
     response = client.get("/api/info")
     assert response.status_code == 200
     body = response.json()
     assert set(body["supported_formats"]) == {"jpeg", "jpg", "png", "webp"}
     assert body["max_upload_bytes"] > 0
     methods = {item["id"]: item for item in body["methods"]}
+    status = get_model_status()
     assert methods["classical"]["available"] is True
-    assert methods["deep_learning"]["available"] is False
-    assert methods["hybrid"]["available"] is False
+    assert methods["deep_learning"]["available"] is status.available
+    assert methods["hybrid"]["available"] is status.available
     assert "Zero-DCE" in methods["deep_learning"]["description"]
 
 
@@ -171,6 +174,11 @@ def test_enhance_classical_returns_a_real_image(client):
     assert body["output"]["mean_luminance"] > body["input"]["mean_luminance"] + 10
     assert "clahe" in body["stages"]
     assert "multiscale_retinex" in body["stages"]
+    assert body["full_reference"]["available"] is False
+    assert body["full_reference"]["psnr"] is None
+    assert body["full_reference"]["ssim"] is None
+    assert body["no_reference"]["niqe"] is None
+    assert "not estimated" in body["full_reference"]["reason"].lower() or "reference" in body["full_reference"]["reason"].lower()
 
     decoded = cv2.imdecode(
         np.frombuffer(__import__("base64").b64decode(body["image_base64"]), dtype=np.uint8),
@@ -182,16 +190,38 @@ def test_enhance_classical_returns_a_real_image(client):
     assert body["output_bytes"] == len(__import__("base64").b64decode(body["image_base64"]))
 
 
-def test_enhance_rejects_unavailable_and_unknown_methods(client):
+def test_enhance_rejects_unknown_method(client):
+    payload = rgb_bytes(dark_scene(64, 64), "PNG")
+    unknown = client.post(
+        "/api/enhance",
+        files={"file": ("night.png", payload, "image/png")},
+        data={"method": "magic"},
+    )
+    assert unknown.status_code == 400
+
+
+def test_missing_weights_disable_learned_methods(client, monkeypatch, tmp_path):
+    from app.services.zerodce import reset_model_cache
+
+    monkeypatch.setattr(get_settings(), "zerodce_weights", str(tmp_path / "missing.pth"))
+    reset_model_cache()
     payload = rgb_bytes(dark_scene(64, 64), "PNG")
     files = {"file": ("night.png", payload, "image/png")}
-    deep = client.post("/api/enhance", files=files, data={"method": "deep_learning"})
-    hybrid = client.post("/api/enhance", files=files, data={"method": "hybrid"})
-    unknown = client.post("/api/enhance", files=files, data={"method": "magic"})
-    assert deep.status_code == 501
-    assert "Zero-DCE" in deep.json()["detail"]
-    assert hybrid.status_code == 501
-    assert unknown.status_code == 400
+    try:
+        info = client.get("/api/info")
+        methods = {item["id"]: item for item in info.json()["methods"]}
+        assert methods["deep_learning"]["available"] is False
+        assert methods["hybrid"]["available"] is False
+        deep = client.post("/api/enhance", files=files, data={"method": "deep_learning"})
+        hybrid = client.post("/api/enhance", files=files, data={"method": "hybrid"})
+        assert deep.status_code == 501
+        assert "weights" in deep.json()["detail"].lower()
+        assert hybrid.status_code == 501
+        classical = client.post("/api/enhance", files=files, data={"method": "classical"})
+        assert classical.status_code == 200
+    finally:
+        monkeypatch.undo()
+        reset_model_cache()
 
 
 def test_enhance_corrupted_file(client):
@@ -217,3 +247,56 @@ def test_path_traversal_filename_is_reduced_to_basename(client):
     assert response.status_code == 200
     assert response.json()["filename"] == "passwd.png"
     assert "/" not in response.json()["filename"]
+
+
+def test_reference_enables_full_reference_metrics(client):
+    payload = rgb_bytes(dark_scene(96, 80), "PNG")
+    response = client.post(
+        "/api/enhance",
+        files={
+            "file": ("night.png", payload, "image/png"),
+            "reference": ("truth.png", payload, "image/png"),
+        },
+        data={"method": "classical", "include_intermediates": "true"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["full_reference"]["available"] is True
+    assert body["full_reference"]["psnr"] is not None or body["full_reference"]["psnr_is_infinite"] is True
+    assert 0.0 <= body["full_reference"]["ssim"] <= 1.0
+    names = [item["name"] for item in body["intermediates"]]
+    assert "illumination" in names
+    assert "clahe" in names
+
+
+def test_compare_runs_every_available_method(client):
+    from app.services.zerodce import get_model_status
+
+    payload = rgb_bytes(dark_scene(96, 72), "PNG")
+    response = client.post(
+        "/api/compare",
+        files={"file": ("night.png", payload, "image/png")},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    by_method = {item["method"]: item for item in body["results"]}
+    assert set(by_method) == {"classical", "deep_learning", "hybrid"}
+    assert by_method["classical"]["available"] is True
+    assert by_method["classical"]["processing_time_ms"] > 0
+    assert by_method["classical"]["output"]["mean_luminance"] > by_method["classical"]["input"]["mean_luminance"]
+    learned = get_model_status().available
+    assert by_method["deep_learning"]["available"] is learned
+    assert by_method["hybrid"]["available"] is learned
+    if learned:
+            assert by_method["deep_learning"]["model"]["name"] == "Zero-DCE++"
+            assert by_method["deep_learning"]["processing_time_ms"] > 0
+            assert by_method["deep_learning"]["output"]["mean_luminance"] > by_method["deep_learning"]["input"]["mean_luminance"]
+            weights = by_method["hybrid"]["fusion_weights"]
+            assert weights["classical_mean"] + weights["deep_learning_mean"] == pytest.approx(1.0, abs=0.02)
+            assert weights["deep_learning_dark_mean"] is None or weights["deep_learning_bright_mean"] is None or (
+                weights["deep_learning_dark_mean"] != weights["deep_learning_bright_mean"]
+            )
+            assert by_method["hybrid"]["image_base64"]
+    else:
+        assert by_method["deep_learning"]["processing_time_ms"] is None
+        assert by_method["deep_learning"]["image_base64"] == ""

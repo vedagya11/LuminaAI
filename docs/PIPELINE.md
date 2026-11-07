@@ -1,31 +1,54 @@
-# Classical restoration pipeline
+# Restoration pipeline
 
-LUMINA AI phase 1 enhances a photograph with OpenCV and NumPy. It does not load a neural network. Zero-DCE is a later phase and is refused by the API with HTTP 501.
+LUMINA AI runs three restorers. Each one returns the pixels it produced, the stages that ran, and measurements from those pixels.
 
-The implementation lives in `backend/app/services/enhance.py`. Every statistic returned by `POST /api/enhance` is measured on the image that was just processed.
+## Classical CV
 
-## Stages
+Implemented in `backend/app/services/enhance.py`.
 
-1. **Noise estimate.** Median absolute deviation of a 3×3 Laplacian on the Y channel, scaled by 0.6745. This is a robust sigma estimate, not a constant.
+1. Laplacian MAD noise estimate.
+2. Bilateral denoise when sigma is at least 2. Strength follows the estimate. Clean frames skip it.
+3. Gray-world white balance. Gains are clamped to `[0.75, 1.35]`. When enough pixels are above the noise floor, the means are weighted by luminance.
+4. Multi-scale bright-channel illumination at scales 15, 80, and 250, capped by image size.
+5. A gamma map, not one gamma for the whole frame. Where illumination is below 0.50, gamma is `log(0.52) / log(illumination)`, clipped to `[0.35, 0.92]`. Brighter illumination stays at 1, so a bright region beside a shadow is not pushed up with the shadow.
+6. Restored luminance is `Y / illumination × illumination^gamma`.
+7. A zero-mean log-domain multi-scale Retinex residual (Jobson) is added only as local detail in shadows. Subtracting the mean stops it from acting as a global brightness offset.
+8. CLAHE on Y. Clip limit is 2.0 when the luminance standard deviation is at least 35, otherwise 2.8.
+9. Luminance unsharp mask, amount 0.55, sigma 1.1.
+10. Highlight rolloff blends the original luminance back in above 0.82.
+11. Chroma is expanded by the luminance gain, capped at 1.25, and only where luminance increased.
 
-2. **Bilateral denoise.** Applied only when that sigma is at least 2. `sigmaColor` is `clip(sigma × 1.6, 10, 45)` and `sigmaSpace` is 5. Clean frames skip this stage, and the response will not list `bilateral_denoise`.
+`python -m evaluation.ablation` prints the measured luminance with each stage turned off. The pytest ablation checks that disabling Retinex reduces the shadow lift.
 
-3. **Gray-world color constancy.** Per-channel gains pull B, G, and R toward their joint mean. Gains outside `[0.75, 1.35]` are clamped. Gains within 3 percent of 1 are ignored so a neutral image is not recolored.
+## Zero-DCE++
 
-4. **Multi-scale illumination.** The bright channel (max of B, G, R) is blurred at scales 15, 80, and 250 and mixed with weights 0.5, 0.3, and 0.2. Each scale is capped at a quarter of the shorter image side so small uploads stay stable.
+Implemented in `backend/app/services/zerodce.py`.
 
-5. **Adaptive gamma on illumination only.** Let `m` be the mean illumination. If `m` is already at least 0.50, gamma is 1 and this stage is skipped. Otherwise gamma is `log(0.52) / log(m)`, clipped to `[0.35, 0.92]`. Restored luminance is `Y / illumination × illumination^gamma`. Shadows move more than highlights. A single added brightness offset cannot do that.
+The network is the authors' `enhance_net_nopool`: depthwise-separable convolutions, 32 filters, a 3-channel curve, and eight quadratic iterations `x + r (x² − x)`. Curves are estimated at 1/12 resolution. The bundled file is Epoch99.
 
-6. **CLAHE** on the Y channel. Clip limit is 2.0 when the luminance standard deviation is at least 35, otherwise 2.8. Tile grid is at most 8×8 and shrinks with the image.
+- SHA-256 `ca8855b90df9a80fa4195a831f33d3476b1964f787eb70602797c773067f3b84`
+- Source: [Li-Chongyi/Zero-DCE_extension](https://github.com/Li-Chongyi/Zero-DCE_extension)
+- The upstream repository has no LICENSE file. See `backend/models/README.md`.
+- Inference is on CPU. A thread lock guards the cached module.
+- The long side is limited by `MAX_INFERENCE_SIDE` (default 1280). Larger uploads are reduced for the forward pass and the result is resized back. The response says so.
+- If the file is missing, the hash of the bundled name does not match, or PyTorch is absent, the method returns HTTP 501. It does not fall back to classical brightening.
 
-7. **Luminance unsharp mask.** `Y + 0.55 × (Y − Gaussian(Y, σ=1.1))`. Chroma is not sharpened.
+## Hybrid
 
-8. **Highlight rolloff.** Original pixels at or above luminance 0.82 are blended back toward the source, fully at white. This keeps lamps and windows from clipping.
+Implemented in `backend/app/services/hybrid.py`.
 
-9. **Chroma restore.** Cr and Cb are expanded by the luminance gain, capped at 1.25, and only where luminance increased. The stage is omitted when the chroma planes do not change.
+Both restorations are computed. A per-pixel network weight comes from darkness, local Laplacian noise, a global color-cast penalty, and a highlight gate above luminance 0.70. Classical weight is one minus that value. Highlights therefore keep the classical result, which has its own rolloff. The API returns the mean weights and the mean network weight inside dark and bright regions when those regions exist.
 
-## What this is not
+## Metrics
 
-- It is not `convertScaleAbs`, a global gamma on the whole BGR image, or a histogram stretch presented as a model.
-- It is not Zero-DCE, Retinexformer, or any checkpoint. PyTorch is not installed in this phase, so a missing weight file cannot be confused with a working model.
-- Processing time is `time.perf_counter()` around `enhance_classical` only. It is not a stored benchmark.
+`backend/app/services/metrics.py`
+
+| Score | Kind | When it is present |
+| --- | --- | --- |
+| Mean luminance, contrast, noise sigma | No reference | Always, from the result |
+| Saturation and luminance percentiles | No reference | Always |
+| PSNR, SSIM | Full reference | Only when a same-size reference upload is provided |
+| LPIPS | Full reference | Only when a reference is provided and the `lpips` package can load its network. It is not installed by default. |
+| NIQE | No reference | Not computed. The official parameter file is not bundled, and no substitute number is returned. |
+
+An identical pair reports infinite PSNR explicitly (`psnr` null and `psnr_is_infinite` true), not a capped fake value.
